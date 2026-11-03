@@ -236,6 +236,21 @@ Page-level access to a local multi-page `.drawio` file, so one page can be inspe
 | `get_page` | `path`, `page` | The page's `mxGraphModel` XML |
 | `set_page` | `path`, `page`, `content` | Replaces that page's content (a single `<mxGraphModel>` element); all other pages stay untouched |
 
+### `list_cells` / `edit_cells`
+
+Cell-level access to one page of a local `.drawio` file, so one shape or edge can be found and changed without re-sending the whole page.
+
+| Tool | Parameters | Result |
+|------|------------|--------|
+| `list_cells` | `path`, `page`, optional filters `ids`, `type`, `parent`, `label`, `style`, `connected_to`, plus `xml`, `offset`, `limit` | `{hash, total, cells: [{id, type, label, parent, source, target, style, x, y, width, height, points, data}]}` |
+| `edit_cells` | `path`, `page`, `operations`, optional `if_hash`, `dry_run` | Applies `add` / `update` / `delete` operations in order, all or nothing, and returns the result of each plus the changed cells |
+
+- **add**: fields (`type`, `id`, `label`, `style`, `style_set`, `parent`, `x`, `y`, `width`, `height`, `source`, `target`, `points`) or `xml` (one `<mxCell>`, `<object>` or `<UserObject>`). Ids added earlier in the batch can be used later in it.
+- **update**: `id` plus only what changes. `style_set` merges style keys (`null` removes one). `source` / `target` `""` detaches an end, `points: []` clears waypoints, `data` sets attributes of an `<object>` cell.
+- **delete**: `id`. Children and every edge left with a dangling end go too; the result lists them.
+
+Every byte an operation does not change is kept as it was, compression included. Pass the `hash` from `list_cells` as `if_hash` to refuse the edit when the file changed in between.
+
 ## Example Prompts
 
 - "Use `open_drawio_mermaid` to create a sequence diagram showing OAuth2 authentication flow"

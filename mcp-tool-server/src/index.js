@@ -7,6 +7,7 @@ import pako from "pako";
 import { routeXml } from "./libavoid-pass.js";
 import { layoutXml } from "./elk-pass.js";
 import { assertPagePath, listPageMeta, readPageXml, writePageXml } from "./pages.js";
+import { listCells, editCells } from "./cells.js";
 import { SHAPE_INDEX } from "./cdn-cache.js";
 import { loadShapeIndex } from "./shape-index.js";
 import { spawn } from "child_process";
@@ -667,6 +668,91 @@ const tools =
       required: ["path", "page", "content"],
     },
   },
+  {
+    name: "list_cells",
+    description:
+      "Lists the cells (shapes, edges, layers) of one page in a local .drawio file in a compact form: " +
+      "id, type, label, parent, source/target, style, x/y/width/height (relative to the parent) and waypoints. " +
+      "Filter to find cells without reading the whole page. Returns a page hash to pass to edit_cells as if_hash. " +
+      "Set xml: true to also get each cell's raw XML.",
+    inputSchema:
+    {
+      type: "object",
+      properties:
+      {
+        path: { type: "string", description: "Path to the local file. Must end in .drawio or .xml." },
+        page: { type: "string", description: "Zero-based page index, exact page name, or page id (see list_pages)." },
+        ids: { type: "array", items: { type: "string" }, description: "Only these cell ids." },
+        type: { type: "string", enum: ["vertex", "edge", "layer", "root", "cell"], description: "Only cells of this type." },
+        parent: { type: "string", description: "Only direct children of this cell id (a layer or container)." },
+        label: { type: "string", description: "Only cells whose label contains this text (case-insensitive)." },
+        style: { type: "string", description: "Only cells whose style contains this text, e.g. \"fillColor=#dae8fc\" or \"swimlane\"." },
+        connected_to: { type: "string", description: "Only edges whose source or target is this cell id." },
+        xml: { type: "boolean", description: "Include each cell's raw XML (default false)." },
+        offset: { type: "number", description: "Skip this many matches (default 0)." },
+        limit: { type: "number", description: "Maximum cells to return (default 200, max 1000)." },
+      },
+      required: ["path", "page"],
+    },
+  },
+  {
+    name: "edit_cells",
+    description:
+      "Adds, updates or deletes individual cells on one page of a local .drawio file, without re-sending the page. " +
+      "Operations run in order and are all-or-nothing: if one fails, nothing is written and the error names it. " +
+      "Every byte you do not change stays as it was. " +
+      "add: give fields (type vertex|edge, id optional, label, style, parent default first layer, x, y, width, height, source, target, points) " +
+      "or xml (one <mxCell>/<object>/<UserObject>). Later operations can use ids added earlier in the batch. " +
+      "update: id plus only what changes: label, style (replace), style_set ({key: value}, null removes a key), " +
+      "x/y/width/height, parent, source/target (\"\" detaches), points ([] clears), data (attributes of an <object> cell). " +
+      "delete: id; also removes its children and every edge connected to them, and reports them. " +
+      "Coordinates are relative to the parent. Use list_cells first to find ids.",
+    inputSchema:
+    {
+      type: "object",
+      properties:
+      {
+        path: { type: "string", description: "Path to the local file. Must end in .drawio or .xml." },
+        page: { type: "string", description: "Zero-based page index, exact page name, or page id (see list_pages)." },
+        operations:
+        {
+          type: "array",
+          description: "The operations to apply, in order.",
+          items:
+          {
+            type: "object",
+            properties:
+            {
+              op: { type: "string", enum: ["add", "update", "delete"] },
+              id: { type: "string" },
+              type: { type: "string", enum: ["vertex", "edge"] },
+              xml: { type: "string" },
+              label: { type: "string" },
+              style: { type: "string" },
+              style_set: { type: "object", description: "Style keys to set; a null value removes the key." },
+              parent: { type: "string" },
+              source: { type: "string" },
+              target: { type: "string" },
+              x: { type: "number" },
+              y: { type: "number" },
+              width: { type: "number" },
+              height: { type: "number" },
+              points:
+              {
+                type: "array",
+                items: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"] },
+              },
+              data: { type: "object", description: "Attributes of an <object>/<UserObject> cell; a null value removes one." },
+            },
+            required: ["op"],
+          },
+        },
+        if_hash: { type: "string", description: "Page hash from list_cells or a previous edit_cells; the edit is refused if the page changed since." },
+        dry_run: { type: "boolean", description: "Check and report the result without writing the file (default false)." },
+      },
+      required: ["path", "page", "operations"],
+    },
+  },
 ];
 
 // The values open_drawio_xml accepts for its pass options, from its schema —
@@ -806,7 +892,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) =>
       };
     }
 
-    if (name === "list_pages" || name === "get_page" || name === "set_page")
+    if (name === "list_pages" || name === "get_page" || name === "set_page" ||
+      name === "list_cells" || name === "edit_cells")
     {
       const filePath = args?.path;
 
@@ -847,6 +934,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) =>
         return {
           content: [{ type: "text", text: "Error: page parameter is required" }],
           isError: true,
+        };
+      }
+
+      if (name === "list_cells")
+      {
+        const listed = listCells(filePath, page,
+        {
+          filter:
+          {
+            ids: args.ids,
+            type: args.type,
+            parent: args.parent,
+            label: args.label,
+            style: args.style,
+            connected_to: args.connected_to,
+          },
+          xml: args.xml === true,
+          offset: args.offset,
+          limit: args.limit,
+        });
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(listed, null, 2) }],
+        };
+      }
+
+      if (name === "edit_cells")
+      {
+        const edited = editCells(filePath, page, args.operations,
+        {
+          if_hash: args.if_hash,
+          dry_run: args.dry_run === true,
+        });
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(edited, null, 2) }],
         };
       }
 

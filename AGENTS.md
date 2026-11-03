@@ -124,7 +124,14 @@ Page-level access to a local multi-page `.drawio` file, so a large file doesn't 
 - **`get_page`**: `{ path: string, page: string }` (`page` is a zero-based index, exact page name, or page id) → raw `mxGraphModel` XML for that page
 - **`set_page`**: `{ path: string, page: string, content: string }` → replaces that page's content with new `mxGraphModel` XML (a single `<mxGraphModel>` element, no `<diagram>` tags), leaving all other pages untouched
 
-These are the only tools that read/write local files by path; paths must end in `.drawio` or `.xml`.
+These and `list_cells` / `edit_cells` are the only tools that read/write local files by path; paths must end in `.drawio` or `.xml`.
+
+### `list_cells` / `edit_cells`
+
+Cell-level access to one page of a local `.drawio` file, so a model can find and change one shape or edge without re-sending the page.
+
+- **`list_cells`**: `{ path, page, ids?, type?, parent?, label?, style?, connected_to?, xml?, offset?, limit? }` → `{hash, total, cells}` in a compact form (id, type, label, parent, source/target, style, geometry, waypoints, `<object>` data)
+- **`edit_cells`**: `{ path, page, operations, if_hash?, dry_run? }` → applies `add` / `update` / `delete` in order, all or nothing; `delete` also removes children and the edges connected to them. Everything an operation does not change keeps its bytes (see `mcp-tool-server/AGENTS.md`)
 
 **Use case**: Call `list_pages` first on any large multi-page file to find the page you need by name/index/id, then `get_page`/`set_page` to work on just that page instead of the whole file.
 

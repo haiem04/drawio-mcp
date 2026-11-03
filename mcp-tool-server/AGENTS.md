@@ -19,6 +19,7 @@ The original draw.io MCP server. Opens diagrams directly in the draw.io editor v
 | `src/shape-index.js` | Loads the `search_shapes` index through `cdn-cache.js`; the JSON parse doubles as the cache validator |
 | `src/mermaid-elk.js` | Copy of `shared/mermaid-elk.js` (copy-shared): the Mermaid ELK layout selector behind `open_drawio_mermaid`'s `postLayout`. Covered by `test/mermaid-elk.test.js` |
 | `src/pages.js` | Local `.drawio` file page access for `list_pages`/`get_page`/`set_page` — regex-scans `<diagram>` blocks (same tag-boundary technique as `mx-xml.js`), decompresses/compresses per-page with `pako` as needed. Covered by `test/pages.test.js` (`npm test`) |
+| `src/cells.js` | Cell-level access for `list_cells`/`edit_cells` on one page read and written through `pages.js`. A small element scanner finds each cell's offsets and edits are splices, never a re-serialization. Covered by `test/cells.test.js` |
 | `vendor/libavoid/` | Vendored libavoid-js **node** build + `libavoid.wasm` (see its README). Loaded by path in plain Node — no inlining/base64 (that's the app server's sandbox concern) |
 
 ## Tools
@@ -93,6 +94,25 @@ Local-file, page-level access for large multi-page `.drawio` files, so an LLM do
 Draw.io stores each `<diagram>` body as either plain `mxGraphModel` XML or a base64(`pako.deflateRaw`) blob, independently per page — `src/pages.js` detects which per page (body starts with `<` vs. not) rather than trusting the outer `<mxfile compressed="...">` attribute, since files can mix compression states across pages. Duplicate page names are resolved by erroring with the ambiguous indices rather than guessing (use the index or `id` instead; a page whose name is all digits is parsed as an index, so address it by `id`).
 
 These are the only tools whose arguments touch the local filesystem, so they are deliberately constrained: paths must end in `.drawio` or `.xml` (checked before existence, so arbitrary paths aren't probed); `set_page` content must be a single `<mxGraphModel>` element and is rejected if it contains raw `<diagram>` tags (which would escape the page body and rewrite the file's page structure); decompression is capped at 64 MB against deflate bombs; writes go through a temp file + rename so a crash can't truncate the target. Self-closing `<diagram/>` pages (empty pages) are handled on both read and write.
+
+### `list_cells` / `edit_cells`
+
+Cell-level access to one page of a local `.drawio` file (`src/cells.js`), so a model can change one shape or edge without sending the whole page back through `set_page`. The page is read and written through `pages.js`, so the path rules, per-page compression and atomic write are the same.
+
+- **`list_cells(path, page, …filters)`** returns `{hash, total, cells}` with a compact form of each cell (id, type `root|layer|vertex|edge|cell`, label, parent, source/target, style, x/y/width/height relative to the parent, waypoints, and the extra attributes of an `<object>`/`<UserObject>` cell as `data`). Filters: `ids`, `type`, `parent`, `label` (case-insensitive substring), `style` (substring), `connected_to`; `xml: true` adds each cell's raw XML. `hash` is a short SHA-256 of the page XML.
+- **`edit_cells(path, page, operations, if_hash?, dry_run?)`** applies `add` / `update` / `delete` operations in order. All or nothing: the first failure throws with its index and nothing is written. `if_hash` refuses the edit when the page changed since that hash.
+
+Edits are splices at offsets found by a small element scanner (tag pattern plus a stack, under the first `<root>`), never a re-serialization of a parsed model. Rebuilding the XML from a model, as some other draw.io MCP servers do, drops custom `<object>` attributes and reorders cells (z-order, and children ahead of parents). Here everything an operation does not change keeps its bytes, the whitespace before a rewritten tag's `>` and an unchanged label's entities included. Text between elements that holds a `<` the scanner did not match (single-quoted attributes, CDATA) refuses the edit instead of guessing. Tested on 36 pages of 7 real files: an edit and its revert give back the same bytes.
+
+Rules the operations enforce:
+
+- Ids are unique; `add` generates `c-<random>` when none is given. A new cell's `parent`, `source` and `target` must exist (cells added earlier in the batch count); terminals cannot be the root or a layer; a `parent` change cannot put a cell inside itself.
+- New cells are appended at the end of `<root>`, which keeps parents ahead of children (draw.io's codec needs it) and puts the cell on top.
+- An `<object>`/`<UserObject>` cell's label lives on the wrapper's `label`, its style, parent and terminals on the inner `<mxCell>`; `update` writes each where it belongs. `data` sets wrapper attributes (not `id`/`label`).
+- `delete` removes the cell, its descendants and every edge left with a dangling end (and that edge's own children, such as edge labels), as draw.io's delete does. The root and layers are refused. Deleting an id that an earlier delete in the batch already removed reports `already removed`.
+- An `update` whose values equal the current ones reports `unchanged` and leaves the bytes alone.
+
+The tools do not run the repair, normalization or label passes of `open_drawio_xml`: they change exactly what was asked.
 
 ## URL Generation
 
